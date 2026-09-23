@@ -946,50 +946,49 @@ static asynStatus vxiConnectPort(vxiPort *pvxiPort,asynUser *pasynUser)
     pvxiPort->server.connected = TRUE;
     pvxiPort->ctrlAddr = -1;
     if(pvxiPort->isGpibLink) {
-        /* Ask the controller's gpib address.*/
+        /* Ask the controller's gpib address.
+         * Some LAN-GPIB gateways (observed: HP/Agilent E5810, ICS 8065) do
+         * not implement this optional VXI-11.2 docmd sub-command and reply
+         * "operation not supported". Treat that as non-fatal: skip the
+         * bus/controller-status checks below instead of aborting the whole
+         * connection, since most gateways never expose this. */
         status = vxiBusStatus(pvxiPort,
             VXI_BSTAT_BUS_ADDRESS,pvxiPort->defTimeout,&pvxiPort->ctrlAddr);
         if(status!=asynSuccess) {
+            pvxiPort->ctrlAddr = -1;
             reportConnectStatus(pvxiPort, vxiConnectReadBusAddress,
-                "%s vxiConnectPort cannot read bus status initialization aborted\n",
+                "%s vxiConnectPort cannot read bus status -- "
+                "continuing without controller/bus-status checks\n",
                 pvxiPort->portName);
-            if (pvxiPort->server.connected)
-                vxiDisconnectPort(pvxiPort);
-            return status;
-        }
-        /* initialize the vxiPort structure with the data we have got so far */
-        pvxiPort->primary[pvxiPort->ctrlAddr].primary.lid = link;
-        pvxiPort->primary[pvxiPort->ctrlAddr].primary.connected = TRUE;
-        /* now we can use vxiBusStatus; if we are not the controller fail */
-        status = vxiBusStatus(pvxiPort, VXI_BSTAT_SYSTEM_CONTROLLER,
-            pvxiPort->defTimeout,&isController);
-        if(status!=asynSuccess) {
-            reportConnectStatus(pvxiPort, vxiConnectReadSystemController,
-                "%s vxiConnectPort vxiBusStatus error initialization aborted\n",
-                pvxiPort->portName);
-            if (pvxiPort->server.connected)
-                vxiDisconnectPort(pvxiPort);
-            return status;
-        }
-        if(isController == 0) {
-            status = vxiBusStatus(pvxiPort, VXI_BSTAT_CONTROLLER_IN_CHARGE,
+        } else {
+            /* initialize the vxiPort structure with the data we have got so far */
+            pvxiPort->primary[pvxiPort->ctrlAddr].primary.lid = link;
+            pvxiPort->primary[pvxiPort->ctrlAddr].primary.connected = TRUE;
+            /* now we can use vxiBusStatus; if we are not the controller fail */
+            status = vxiBusStatus(pvxiPort, VXI_BSTAT_SYSTEM_CONTROLLER,
                 pvxiPort->defTimeout,&isController);
             if(status!=asynSuccess) {
-                reportConnectStatus(pvxiPort, vxiConnectReadControllerInCharge,
-                    "%s vxiConnectPort vxiBusStatus error initialization aborted\n",
+                reportConnectStatus(pvxiPort, vxiConnectReadSystemController,
+                    "%s vxiConnectPort vxiBusStatus error -- "
+                    "continuing without controller-status check\n",
                     pvxiPort->portName);
-                if (pvxiPort->server.connected)
-                    vxiDisconnectPort(pvxiPort);
-                return asynError;
-            }
-            if(isController == 0) {
-                reportConnectStatus(pvxiPort, vxiConnectNotController,
-                    "%s vxiConnectPort neither system controller nor "
-                    "controller in charge -- initialization aborted\n",
-                    pvxiPort->portName);
-                if (pvxiPort->server.connected)
-                    vxiDisconnectPort(pvxiPort);
-                return asynError;
+            } else if(isController == 0) {
+                status = vxiBusStatus(pvxiPort, VXI_BSTAT_CONTROLLER_IN_CHARGE,
+                    pvxiPort->defTimeout,&isController);
+                if(status!=asynSuccess) {
+                    reportConnectStatus(pvxiPort, vxiConnectReadControllerInCharge,
+                        "%s vxiConnectPort vxiBusStatus error -- "
+                        "continuing without controller-in-charge check\n",
+                        pvxiPort->portName);
+                } else if(isController == 0) {
+                    reportConnectStatus(pvxiPort, vxiConnectNotController,
+                        "%s vxiConnectPort neither system controller nor "
+                        "controller in charge -- initialization aborted\n",
+                        pvxiPort->portName);
+                    if (pvxiPort->server.connected)
+                        vxiDisconnectPort(pvxiPort);
+                    return asynError;
+                }
             }
         }
     }
@@ -1527,6 +1526,14 @@ static asynStatus vxiSrqStatus(void *drvPvt,int *srqStatus)
     if(pvxiPort->isSingleLink) {
         *srqStatus =  pvxiPort->singleLinkInterrupt;
         pvxiPort->singleLinkInterrupt = FALSE;
+        return asynSuccess;
+    }
+    if(!pvxiPort->hasSRQ) {
+        /* FLAG_NO_SRQ was given at vxi11Configure -- some gateways
+         * (e.g. ICS 8065, HP/Agilent E5810) don't implement the
+         * VXI_BSTAT_SRQ docmd at all; skip it rather than polling
+         * and logging an error every cycle. */
+        *srqStatus = 0;
         return asynSuccess;
     }
     status = vxiBusStatus(pvxiPort, VXI_BSTAT_SRQ,
